@@ -1,0 +1,10 @@
+.DS_Store
+.ipynb_checkpoints
+__pycache__
+
+datasets
+archive
+mlruns
+tmp
+workspace.code-workspace
+*.png

@@ -1,14 +1,15 @@
+#%%
 import os
 import numpy as np
 import pandas as pd
 import pickle as pkl
 import tensorflow as tf
-from sklearn import preprocessing
+from tqdm import tqdm
 
 def save_dataset(dataset, path='datasets/tfsnapshot'):
   tf.data.experimental.save(dataset, path)
 
-def dataset_generator(path='datasets', cage_peak_file='K562_cage_tbl.tsv', cage_peak_target='m'):
+def dataset_generator_legacy(path='datasets', cage_peak_file='K562_cage_tbl.tsv', cage_peak_target='m'):
   all_rpe = []    # just to record all relative position w.r.t CAGE peak
   pos_strand = 0  # just to count how many TFBS on positive strand
   neg_strand = 0  # just to count how many TFBS on negative strand
@@ -57,11 +58,11 @@ def dataset_generator(path='datasets', cage_peak_file='K562_cage_tbl.tsv', cage_
       pos_strand += (tfbs_df.strand == '+').sum() # just to count how many TFBS on positive strand
       neg_strand += (tfbs_df.strand == '-').sum() # just to count how many TFBS on negative strand
     
-      rpe = tf.convert_to_tensor(tfbs_df.RPE)
+      rpe = tf.convert_to_tensor(tfbs_df.RPE) # change variable name
 
-      tfbs_feature = tf.convert_to_tensor(tfbs_df[feature_cols].astype(float))
+      tfbs_feature = tf.convert_to_tensor(tfbs_df[feature_cols].astype(float)) # change variable name
 
-      # one-hot encoding for sequence
+      # one-hot encoding for sequence shape: (51, 4)
       tfbs_seq = tf.one_hot(tf.convert_to_tensor(tk.texts_to_sequences(tfbs_df.seq)), depth=4)
 
       # read adjancency matrix (not used for now)
@@ -72,7 +73,8 @@ def dataset_generator(path='datasets', cage_peak_file='K562_cage_tbl.tsv', cage_
 
       # read transcription factor binding site chromosome region
       # transform string region into integer, starting from 0
-      # encoded_region is the id mapping with key: chromosome_region, value: integer
+      # encoded_region is the id mapping with key: chromosome_region (CAGE-peak), value: integer 
+      # TODO change to list
       encoded_region = {}
       for i, region_ID in enumerate(adj_df.columns):
         encoded_region[region_ID] = i
@@ -92,3 +94,61 @@ def dataset_generator(path='datasets', cage_peak_file='K562_cage_tbl.tsv', cage_
 
 def load_dataset(path='datasets/tfsnapshot'):
   return tf.data.experimental.load(path)
+
+def split_to_tensor(df, field='H3K4me3', delimiter=','):
+  return tf.math.log(tf.expand_dims(
+    tf.convert_to_tensor([list(map(lambda y: float(y), x)) for x in df[field].str.split(delimiter)]),
+    axis=-1
+  ) + 1)
+
+def dataset_generator(datasets='chr19_active'):
+
+  datasets_dir = os.path.join('datasets', datasets)
+  tad_dir_list = os.listdir(datasets_dir)
+
+  tokenizer = tf.keras.preprocessing.text.Tokenizer(char_level=True, split=',')
+  tokenizer.fit_on_texts(['atcg'])
+
+  for tad_idx, tad_name in tqdm(enumerate(tad_dir_list)):
+    tad_dir = os.path.join(datasets_dir, tad_name)
+    
+    with open(os.path.join(tad_dir, 'TFBSs.pickle'), 'rb') as tfbs_file: 
+      X_df = pkl.load(tfbs_file)
+
+    X_df['DNA_sequence'] = X_df['DNA_sequence'].str.lower()
+    X_df['score'] = X_df['score'].astype(int) / 1000
+
+    nucl = tf.one_hot(tf.convert_to_tensor(tokenizer.texts_to_sequences(X_df['DNA_sequence'])), depth=4)
+    h3k4me3 = split_to_tensor(X_df, 'H3K4me3')
+    h3k27ac = split_to_tensor(X_df, 'H3K27Ac')
+    atacseq = split_to_tensor(X_df, 'ATAC-seq')
+
+    bin_dir_list = os.listdir(tad_dir)
+    for bin_name in bin_dir_list:
+      bin_dir = os.path.join(tad_dir, bin_name)
+      if not os.path.isdir(bin_dir):
+        continue
+
+      with open(os.path.join(bin_dir, 'dists.pickle'), 'rb') as tfbs_file: 
+        hicdist_df = pkl.load(tfbs_file)
+      
+      hicdist = tf.reshape(tf.convert_to_tensor(hicdist_df['HiC'], dtype=tf.float32), (1, -1))
+
+      y_df = pd.read_csv(os.path.join(bin_dir, 'target.tsv'), sep='\t')
+
+      feature_cols = ['zscore', 'Data_in_HiC']
+      feature_df = pd.concat([X_df['score'], hicdist_df[feature_cols]], axis=1)
+      feature = tf.convert_to_tensor(feature_df, dtype=tf.float32)
+      y = tf.reshape(tf.convert_to_tensor(y_df['CAGE_sum']), (1, 1))
+      tad_idx = tf.reshape(tf.convert_to_tensor(tad_idx, dtype=tf.float32), (1, 1))
+      
+      yield {
+        'nucl': nucl,    
+        'h3k4me3': h3k4me3,           
+        'h3k27ac': h3k27ac,     
+        'atacseq': atacseq, 
+        'hicdist': hicdist,
+        'feature': feature,
+        'tad_idx': tad_idx,
+        'y': y
+      }
